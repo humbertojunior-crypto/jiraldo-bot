@@ -30,7 +30,7 @@ if not all([SLACK_BOT_TOKEN, JIRA_EMAIL, JIRA_API_TOKEN]):
     print("   JIRA_API_TOKEN")
 
 # ========================================
-# 🔧 FUNÇÕES JIRA
+# 🔧 FUNÇÕES JIRA (API CORRIGIDA)
 # ========================================
 
 def get_jira_headers():
@@ -44,46 +44,52 @@ def get_jira_headers():
     }
 
 def get_recent_assignments():
-    """Busca atribuições recentes no Jira"""
+    """Busca atribuições recentes no Jira - API CORRIGIDA"""
     try:
-        jql = f"assignee changed during (-3m, now()) AND assignee is not EMPTY"
+        jql_query = "assignee changed during (-3m, now()) AND assignee is not EMPTY"
         
-        url = f"{JIRA_BASE_URL}/rest/api/3/search"
-        params = {
-            "jql": jql,
-            "fields": "key,summary,assignee,status,priority,creator,updated",
+        # ✅ NOVA API CORRETA
+        url = f"{JIRA_BASE_URL}/rest/api/3/search/jql"
+        
+        payload = {
+            "jql": jql_query,
+            "fields": ["key", "summary", "assignee", "status", "priority", "creator", "updated"],
             "maxResults": 50
         }
         
-        response = requests.get(url, headers=get_jira_headers(), params=params, timeout=30)
+        response = requests.post(url, headers=get_jira_headers(), json=payload, timeout=30)
         
         if response.status_code == 200:
             return response.json().get("issues", [])
         else:
-            print(f"❌ Erro Jira: {response.status_code}")
+            print(f"❌ Erro Jira Recent: {response.status_code} - {response.text}")
             return []
             
     except Exception as e:
-        print(f"❌ Erro ao consultar Jira: {e}")
+        print(f"❌ Erro ao consultar atribuições: {e}")
         return []
 
 def get_user_tickets(email):
-    """Busca tickets de um usuário específico"""
+    """Busca tickets de um usuário específico - API CORRIGIDA"""
     try:
-        jql = f'assignee = "{email}" AND status != Done ORDER BY created DESC'
+        jql_query = f'assignee = "{email}" AND status != Done ORDER BY created DESC'
         
-        url = f"{JIRA_BASE_URL}/rest/api/3/search"
-        params = {
-            "jql": jql,
-            "fields": "key,summary,status,priority,created",
+        # ✅ NOVA API CORRETA
+        url = f"{JIRA_BASE_URL}/rest/api/3/search/jql"
+        
+        payload = {
+            "jql": jql_query,
+            "fields": ["key", "summary", "status", "priority", "assignee", "created"],
             "maxResults": 10
         }
         
-        response = requests.get(url, headers=get_jira_headers(), params=params, timeout=30)
+        response = requests.post(url, headers=get_jira_headers(), json=payload, timeout=30)
         
         if response.status_code == 200:
             return response.json().get("issues", [])
-        return []
+        else:
+            print(f"❌ Erro Jira User: {response.status_code} - {response.text}")
+            return []
         
     except Exception as e:
         print(f"❌ Erro ao buscar tickets: {e}")
@@ -206,7 +212,7 @@ def start_monitoring():
         time.sleep(30)
 
 # ========================================
-# 🔍 ENDPOINTS DEBUG
+# 🔍 ENDPOINTS DEBUG (API CORRIGIDA)
 # ========================================
 
 @app.route("/debug", methods=["GET"])
@@ -216,6 +222,7 @@ def debug_info():
     debug_data = {
         "timestamp": datetime.now().isoformat(),
         "bot_status": "online",
+        "api_version": "v3/search/jql (CORRIGIDA)",
         "environment_check": {
             "SLACK_BOT_TOKEN": "✅ Configurado" if SLACK_BOT_TOKEN else "❌ Faltando",
             "JIRA_EMAIL": JIRA_EMAIL if JIRA_EMAIL else "❌ Faltando", 
@@ -257,7 +264,7 @@ def debug_info():
 
 @app.route("/test-user/<username>", methods=["GET"])
 def test_user_tickets(username):
-    """Testa busca de tickets para usuário"""
+    """Testa busca de tickets para usuário - API CORRIGIDA"""
     
     if not all([JIRA_EMAIL, JIRA_API_TOKEN]):
         return jsonify({"error": "Environment variables não configuradas"})
@@ -265,17 +272,19 @@ def test_user_tickets(username):
     user_email = username + EMAIL_DOMAIN
     
     try:
-        jql = f'assignee = "{user_email}" AND status != Done ORDER BY created DESC'
+        jql_query = f'assignee = "{user_email}" AND status != Done ORDER BY created DESC'
         
-        url = f"{JIRA_BASE_URL}/rest/api/3/search"
-        params = {
-            "jql": jql,
-            "fields": "key,summary,status,priority,assignee,created",
+        # ✅ NOVA API CORRETA
+        url = f"{JIRA_BASE_URL}/rest/api/3/search/jql"
+        
+        payload = {
+            "jql": jql_query,
+            "fields": ["key", "summary", "status", "priority", "assignee", "created"],
             "maxResults": 10
         }
         
         headers = get_jira_headers()
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
         
         if response.status_code == 200:
             data = response.json()
@@ -291,8 +300,9 @@ def test_user_tickets(username):
                 })
             
             return jsonify({
+                "api_version": "v3/search/jql (CORRIGIDA)",
                 "user_email": user_email,
-                "jql_query": jql,
+                "jql_query": jql_query,
                 "total_found": len(tickets),
                 "tickets": tickets,
                 "note": "Bot só mostra tickets onde você é ASSIGNEE (não REPORTER)"
@@ -300,13 +310,15 @@ def test_user_tickets(username):
         else:
             return jsonify({
                 "error": f"Erro Jira: {response.status_code}",
-                "message": response.text[:500]
+                "message": response.text[:500],
+                "api_version": "v3/search/jql (CORRIGIDA)"
             })
             
     except Exception as e:
         return jsonify({
             "error": "Erro na busca",
-            "message": str(e)
+            "message": str(e),
+            "api_version": "v3/search/jql (CORRIGIDA)"
         })
 
 # ========================================
@@ -349,7 +361,7 @@ def jiraldo_command():
 • Você será notificado quando receber novos tickets!
 
 *Debug:*
-• Acesse: jiraldo-bot.onrender.com/debug"""
+• jiraldo-bot.onrender.com/debug"""
         
         else:
             response = "🤔 Comando não reconhecido. Digite `/jiraldo help`"
@@ -368,19 +380,20 @@ def jiraldo_command():
 @app.route("/health", methods=["GET"])
 def health():
     """Endpoint de saúde"""
-    return {"status": "ok", "jiraldo": "online", "timestamp": datetime.now().isoformat()}
+    return {"status": "ok", "jiraldo": "online", "api_fixed": "v3/search/jql", "timestamp": datetime.now().isoformat()}
 
 @app.route("/", methods=["GET"])
 def home():
     """Página inicial"""
-    return {"message": "🤖 Jiraldo Bot Online!", "status": "running", "debug": "/debug"}
+    return {"message": "🤖 Jiraldo Bot Online!", "status": "running", "debug": "/debug", "api_fixed": "✅"}
 
 # ========================================
 # 🚀 INICIALIZAÇÃO
 # ========================================
 
 if __name__ == "__main__":
-    print("🤖 Jiraldo Bot SEGURO iniciando...")
+    print("🤖 Jiraldo Bot CORRIGIDO iniciando...")
+    print("✅ API Jira atualizada para v3/search/jql")
     print("🔐 Usando variáveis de ambiente para tokens")
     print(f"🌐 Jira: {JIRA_BASE_URL}")
     print(f"📧 Domain: {EMAIL_DOMAIN}")
