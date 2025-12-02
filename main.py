@@ -13,25 +13,21 @@ app = Flask(__name__)
 # ⚙️ CONFIGURAÇÕES SEGURAS
 # ========================================
 
-# 🔐 TOKENS SEGUROS - via environment variables
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 JIRA_BASE_URL = os.getenv("JIRA_BASE_URL", "https://ifood.atlassian.net")
 JIRA_EMAIL = os.getenv("JIRA_EMAIL")
 JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
 
-# Configurações
 CHECK_INTERVAL_MINUTES = 2
 NOTIFICATION_HOURS = (8, 18)
 EMAIL_DOMAIN = "@ifood.com.br"
 PORT = int(os.getenv("PORT", 5000))
 
-# Verificar se tokens foram configurados
 if not all([SLACK_BOT_TOKEN, JIRA_EMAIL, JIRA_API_TOKEN]):
-    print("❌ CONFIGURE AS VARIÁVEIS DE AMBIENTE NO RAILWAY:")
+    print("❌ CONFIGURE AS VARIÁVEIS DE AMBIENTE NO RENDER:")
     print("   SLACK_BOT_TOKEN")
     print("   JIRA_EMAIL") 
     print("   JIRA_API_TOKEN")
-    print("   Vá em Settings → Environment no Railway Dashboard")
 
 # ========================================
 # 🔧 FUNÇÕES JIRA
@@ -210,6 +206,110 @@ def start_monitoring():
         time.sleep(30)
 
 # ========================================
+# 🔍 ENDPOINTS DEBUG
+# ========================================
+
+@app.route("/debug", methods=["GET"])
+def debug_info():
+    """Debug - mostra configurações e testa conexão"""
+    
+    debug_data = {
+        "timestamp": datetime.now().isoformat(),
+        "bot_status": "online",
+        "environment_check": {
+            "SLACK_BOT_TOKEN": "✅ Configurado" if SLACK_BOT_TOKEN else "❌ Faltando",
+            "JIRA_EMAIL": JIRA_EMAIL if JIRA_EMAIL else "❌ Faltando", 
+            "JIRA_API_TOKEN": "✅ Configurado" if JIRA_API_TOKEN else "❌ Faltando",
+            "JIRA_BASE_URL": JIRA_BASE_URL,
+            "EMAIL_DOMAIN": EMAIL_DOMAIN
+        }
+    }
+    
+    # Teste conexão Jira
+    if all([JIRA_EMAIL, JIRA_API_TOKEN]):
+        try:
+            headers = get_jira_headers()
+            response = requests.get(f"{JIRA_BASE_URL}/rest/api/3/myself", headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                user_data = response.json()
+                debug_data["jira_connection"] = {
+                    "status": "✅ Conectado",
+                    "user": user_data.get("displayName", "N/A"),
+                    "email": user_data.get("emailAddress", "N/A"),
+                    "account_id": user_data.get("accountId", "N/A")[:20] + "..."
+                }
+            else:
+                debug_data["jira_connection"] = {
+                    "status": "❌ Erro",
+                    "code": response.status_code,
+                    "message": response.text[:200]
+                }
+        except Exception as e:
+            debug_data["jira_connection"] = {
+                "status": "❌ Erro de conexão", 
+                "error": str(e)
+            }
+    else:
+        debug_data["jira_connection"] = {"status": "❌ Tokens não configurados"}
+    
+    return jsonify(debug_data)
+
+@app.route("/test-user/<username>", methods=["GET"])
+def test_user_tickets(username):
+    """Testa busca de tickets para usuário"""
+    
+    if not all([JIRA_EMAIL, JIRA_API_TOKEN]):
+        return jsonify({"error": "Environment variables não configuradas"})
+    
+    user_email = username + EMAIL_DOMAIN
+    
+    try:
+        jql = f'assignee = "{user_email}" AND status != Done ORDER BY created DESC'
+        
+        url = f"{JIRA_BASE_URL}/rest/api/3/search"
+        params = {
+            "jql": jql,
+            "fields": "key,summary,status,priority,assignee,created",
+            "maxResults": 10
+        }
+        
+        headers = get_jira_headers()
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            tickets = []
+            
+            for issue in data.get("issues", []):
+                tickets.append({
+                    "key": issue["key"],
+                    "summary": issue["fields"]["summary"],
+                    "status": issue["fields"]["status"]["name"],
+                    "assignee": issue["fields"]["assignee"]["emailAddress"] if issue["fields"]["assignee"] else None,
+                    "created": issue["fields"]["created"]
+                })
+            
+            return jsonify({
+                "user_email": user_email,
+                "jql_query": jql,
+                "total_found": len(tickets),
+                "tickets": tickets,
+                "note": "Bot só mostra tickets onde você é ASSIGNEE (não REPORTER)"
+            })
+        else:
+            return jsonify({
+                "error": f"Erro Jira: {response.status_code}",
+                "message": response.text[:500]
+            })
+            
+    except Exception as e:
+        return jsonify({
+            "error": "Erro na busca",
+            "message": str(e)
+        })
+
+# ========================================
 # 🎯 COMANDOS SLACK
 # ========================================
 
@@ -220,6 +320,9 @@ def jiraldo_command():
         command_text = request.form.get("text", "").strip().lower()
         user_name = request.form.get("user_name", "")
         user_email = user_name + EMAIL_DOMAIN
+        
+        # Log para debug
+        print(f"🔍 Comando: {command_text}, User: {user_name}, Email: {user_email}")
         
         if "tickets" in command_text or "meus" in command_text:
             tickets = get_user_tickets(user_email)
@@ -243,7 +346,10 @@ def jiraldo_command():
 • `/jiraldo help` - Esta ajuda
 
 *Notificações automáticas:*
-• Você será notificado quando receber novos tickets!"""
+• Você será notificado quando receber novos tickets!
+
+*Debug:*
+• Acesse: jiraldo-bot.onrender.com/debug"""
         
         else:
             response = "🤔 Comando não reconhecido. Digite `/jiraldo help`"
@@ -267,7 +373,7 @@ def health():
 @app.route("/", methods=["GET"])
 def home():
     """Página inicial"""
-    return {"message": "🤖 Jiraldo Bot Online!", "status": "running"}
+    return {"message": "🤖 Jiraldo Bot Online!", "status": "running", "debug": "/debug"}
 
 # ========================================
 # 🚀 INICIALIZAÇÃO
@@ -300,4 +406,5 @@ if __name__ == "__main__":
     
     # Iniciar servidor
     print("🌐 Servidor iniciando...")
+    print("🔍 Debug disponível em: /debug")
     app.run(host="0.0.0.0", port=PORT, debug=False)
