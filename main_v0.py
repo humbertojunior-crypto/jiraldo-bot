@@ -1,0 +1,303 @@
+import os
+import time
+import json
+import requests
+import schedule
+from datetime import datetime, timedelta
+from flask import Flask, request, jsonify
+from threading import Thread
+
+app = Flask(__name__)
+
+# ========================================
+# ⚙️ CONFIGURAÇÕES SEGURAS
+# ========================================
+
+# 🔐 TOKENS SEGUROS - via environment variables
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
+JIRA_BASE_URL = os.getenv("JIRA_BASE_URL", "https://ifood.atlassian.net")
+JIRA_EMAIL = os.getenv("JIRA_EMAIL")
+JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
+
+# Configurações
+CHECK_INTERVAL_MINUTES = 2
+NOTIFICATION_HOURS = (8, 18)
+EMAIL_DOMAIN = "@ifood.com.br"
+PORT = int(os.getenv("PORT", 5000))
+
+# Verificar se tokens foram configurados
+if not all([SLACK_BOT_TOKEN, JIRA_EMAIL, JIRA_API_TOKEN]):
+    print("❌ CONFIGURE AS VARIÁVEIS DE AMBIENTE NO RAILWAY:")
+    print("   SLACK_BOT_TOKEN")
+    print("   JIRA_EMAIL") 
+    print("   JIRA_API_TOKEN")
+    print("   Vá em Settings → Environment no Railway Dashboard")
+
+# ========================================
+# 🔧 FUNÇÕES JIRA
+# ========================================
+
+def get_jira_headers():
+    """Headers para autenticação Jira"""
+    import base64
+    credentials = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()).decode()
+    return {
+        "Authorization": f"Basic {credentials}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+
+def get_recent_assignments():
+    """Busca atribuições recentes no Jira"""
+    try:
+        jql = f"assignee changed during (-3m, now()) AND assignee is not EMPTY"
+        
+        url = f"{JIRA_BASE_URL}/rest/api/3/search"
+        params = {
+            "jql": jql,
+            "fields": "key,summary,assignee,status,priority,creator,updated",
+            "maxResults": 50
+        }
+        
+        response = requests.get(url, headers=get_jira_headers(), params=params, timeout=30)
+        
+        if response.status_code == 200:
+            return response.json().get("issues", [])
+        else:
+            print(f"❌ Erro Jira: {response.status_code}")
+            return []
+            
+    except Exception as e:
+        print(f"❌ Erro ao consultar Jira: {e}")
+        return []
+
+def get_user_tickets(email):
+    """Busca tickets de um usuário específico"""
+    try:
+        jql = f'assignee = "{email}" AND status != Done ORDER BY created DESC'
+        
+        url = f"{JIRA_BASE_URL}/rest/api/3/search"
+        params = {
+            "jql": jql,
+            "fields": "key,summary,status,priority,created",
+            "maxResults": 10
+        }
+        
+        response = requests.get(url, headers=get_jira_headers(), params=params, timeout=30)
+        
+        if response.status_code == 200:
+            return response.json().get("issues", [])
+        return []
+        
+    except Exception as e:
+        print(f"❌ Erro ao buscar tickets: {e}")
+        return []
+
+# ========================================
+# 📱 FUNÇÕES SLACK
+# ========================================
+
+def send_slack_dm(user_email, message, attachments=None):
+    """Envia DM para usuário no Slack"""
+    try:
+        headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
+        
+        user_response = requests.get(
+            "https://slack.com/api/users.lookupByEmail",
+            headers=headers,
+            params={"email": user_email},
+            timeout=30
+        )
+        
+        if user_response.json().get("ok"):
+            user_id = user_response.json()["user"]["id"]
+            
+            payload = {
+                "channel": user_id,
+                "text": message,
+                "username": "Jiraldo",
+                "icon_emoji": ":robot_face:"
+            }
+            
+            if attachments:
+                payload["attachments"] = attachments
+            
+            dm_response = requests.post(
+                "https://slack.com/api/chat.postMessage",
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            return dm_response.json().get("ok", False)
+        else:
+            print(f"❌ Usuário não encontrado: {user_email}")
+            return False
+        
+    except Exception as e:
+        print(f"❌ Erro ao enviar DM: {e}")
+        return False
+
+def send_slack_notification(assignment):
+    """Envia notificação de atribuição"""
+    try:
+        assignee_email = assignment["fields"]["assignee"]["emailAddress"]
+        ticket_key = assignment["key"]
+        ticket_summary = assignment["fields"]["summary"]
+        priority = assignment["fields"]["priority"]["name"]
+        ticket_url = f"{JIRA_BASE_URL}/browse/{ticket_key}"
+        
+        message = f"🎯 Novo ticket atribuído para você!"
+        
+        attachments = [{
+            "color": "good",
+            "fields": [
+                {"title": "Ticket", "value": ticket_key, "short": True},
+                {"title": "Prioridade", "value": priority, "short": True},
+                {"title": "Título", "value": ticket_summary, "short": False}
+            ],
+            "actions": [{
+                "type": "button",
+                "text": "🔗 Abrir no Jira",
+                "url": ticket_url
+            }],
+            "footer": "Jiraldo Bot",
+            "ts": time.time()
+        }]
+        
+        success = send_slack_dm(assignee_email, message, attachments)
+        
+        if success:
+            print(f"✅ Notificação enviada para {assignee_email}")
+        else:
+            print(f"❌ Falha ao notificar {assignee_email}")
+            
+    except Exception as e:
+        print(f"❌ Erro na notificação: {e}")
+
+# ========================================
+# 🕐 MONITORAMENTO AUTOMÁTICO
+# ========================================
+
+def check_new_assignments():
+    """Verifica novas atribuições"""
+    try:
+        current_hour = datetime.now().hour
+        if current_hour < NOTIFICATION_HOURS[0] or current_hour > NOTIFICATION_HOURS[1]:
+            return
+        
+        print("🔍 Verificando novas atribuições...")
+        assignments = get_recent_assignments()
+        
+        for assignment in assignments:
+            if assignment["fields"].get("assignee"):
+                send_slack_notification(assignment)
+        
+        if assignments:
+            print(f"📋 Processadas {len(assignments)} atribuições")
+        
+    except Exception as e:
+        print(f"❌ Erro no monitoramento: {e}")
+
+def start_monitoring():
+    """Inicia monitoramento automático"""
+    schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(check_new_assignments)
+    
+    print(f"🚀 Monitoramento iniciado (a cada {CHECK_INTERVAL_MINUTES}min)")
+    
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
+
+# ========================================
+# 🎯 COMANDOS SLACK
+# ========================================
+
+@app.route("/jiraldo", methods=["POST"])
+def jiraldo_command():
+    """Processa comandos /jiraldo"""
+    try:
+        command_text = request.form.get("text", "").strip().lower()
+        user_name = request.form.get("user_name", "")
+        user_email = user_name + EMAIL_DOMAIN
+        
+        if "tickets" in command_text or "meus" in command_text:
+            tickets = get_user_tickets(user_email)
+            
+            if tickets:
+                response = f"🎯 Seus tickets em aberto ({len(tickets)}):\n"
+                for ticket in tickets[:5]:
+                    key = ticket["key"]
+                    summary = ticket["fields"]["summary"]
+                    status = ticket["fields"]["status"]["name"]
+                    response += f"• *{key}*: {summary} _({status})_\n"
+                
+                if len(tickets) > 5:
+                    response += f"\n... e mais {len(tickets) - 5} tickets"
+            else:
+                response = "🎉 Você não tem tickets em aberto!"
+            
+        elif "help" in command_text:
+            response = """🤖 *Comandos do Jiraldo:*
+• `/jiraldo tickets` - Seus tickets em aberto
+• `/jiraldo help` - Esta ajuda
+
+*Notificações automáticas:*
+• Você será notificado quando receber novos tickets!"""
+        
+        else:
+            response = "🤔 Comando não reconhecido. Digite `/jiraldo help`"
+        
+        return jsonify({
+            "response_type": "ephemeral",
+            "text": response
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "response_type": "ephemeral",
+            "text": f"❌ Erro: {e}"
+        })
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Endpoint de saúde"""
+    return {"status": "ok", "jiraldo": "online", "timestamp": datetime.now().isoformat()}
+
+@app.route("/", methods=["GET"])
+def home():
+    """Página inicial"""
+    return {"message": "🤖 Jiraldo Bot Online!", "status": "running"}
+
+# ========================================
+# 🚀 INICIALIZAÇÃO
+# ========================================
+
+if __name__ == "__main__":
+    print("🤖 Jiraldo Bot SEGURO iniciando...")
+    print("🔐 Usando variáveis de ambiente para tokens")
+    print(f"🌐 Jira: {JIRA_BASE_URL}")
+    print(f"📧 Domain: {EMAIL_DOMAIN}")
+    print(f"🚪 Porta: {PORT}")
+    
+    # Teste conexão se tokens estão configurados
+    if all([SLACK_BOT_TOKEN, JIRA_EMAIL, JIRA_API_TOKEN]):
+        try:
+            headers = get_jira_headers()
+            test_response = requests.get(f"{JIRA_BASE_URL}/rest/api/3/myself", headers=headers, timeout=10)
+            
+            if test_response.status_code == 200:
+                user_info = test_response.json()
+                print(f"✅ Jira OK! Usuário: {user_info.get('displayName', 'N/A')}")
+            else:
+                print(f"❌ Erro Jira: {test_response.status_code}")
+        except Exception as e:
+            print(f"⚠️ Aviso Jira: {e}")
+        
+        # Iniciar monitoramento
+        monitor_thread = Thread(target=start_monitoring, daemon=True)
+        monitor_thread.start()
+    
+    # Iniciar servidor
+    print("🌐 Servidor iniciando...")
+    app.run(host="0.0.0.0", port=PORT, debug=False)
